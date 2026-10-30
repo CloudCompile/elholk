@@ -19,6 +19,9 @@ export default function Home() {
           <Link href="/docs" className="px-5 py-3 rounded-lg border border-zinc-800 text-zinc-100 font-bold hover:bg-zinc-900">
             Docs
           </Link>
+          <Link href="https://github.com/CloudCompile/elholk" className="px-5 py-3 rounded-lg border border-zinc-800 text-zinc-100 font-bold hover:bg-zinc-900">
+            GitHub
+          </Link>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">

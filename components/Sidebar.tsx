@@ -35,6 +35,7 @@ const navigation = [
 ];
 
 const secondaryNavigation = [
+  { name: 'GitHub', href: 'https://github.com/CloudCompile/elholk', icon: Code },
   { name: 'About', href: '/about', icon: User },
   { name: 'Pricing', href: '/pricing', icon: Activity },
   { name: 'Terms', href: '/terms-of-service', icon: FileText },
