@@ -26,7 +26,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <ClerkProvider>
+    <ClerkProvider appearance={{ variables: { colorPrimary: '#6366f1' } }} localization={{ signIn: { start: { title: 'Sign in to Elholk' } } }}>
       <html lang="en" className="scroll-smooth" suppressHydrationWarning>
         <body className="min-h-screen bg-background antialiased selection:bg-primary/10 selection:text-primary">
             <Suspense fallback={null}>
