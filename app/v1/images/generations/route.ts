@@ -1,0 +1,679 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { currentUser } from '@clerk/nextjs/server';
+
+import { extractApiKey, validateApiKey, trackUsage, checkRateLimit, getRateLimitInfo, checkDailyLimit, getDailyLimitInfo, ApiKey, applyPlanOverride, applyPeakHoursLimit } from '@/lib/api-keys';
+import { IMAGE_MODELS, PROVIDER_URLS, ImageModel, PREMIUM_MODELS } from '@/lib/providers';
+import { getCorsHeaders, getPollinationsApiKey, getPollinationsApiKeys, safeResponseJson, hasProAccess } from '@/lib/utils';
+import { supabaseAdmin } from '@/lib/supabase';
+
+export const runtime = 'nodejs';
+export const maxDuration = 300; // 5 minutes max for long image generation
+
+// Handle OPTIONS for CORS
+export async function OPTIONS() {
+  return new NextResponse(null, {
+    status: 204,
+    headers: getCorsHeaders(),
+  });
+}
+
+export async function GET() {
+  return NextResponse.json({
+    message: 'Images generation endpoint is active. Use POST to generate images.',
+    example: {
+      model: 'flux',
+      prompt: 'A beautiful landscape'
+    }
+  }, {
+    headers: getCorsHeaders()
+  });
+}
+
+// Map Stable Horde model IDs to actual model names
+function getStableHordeModelName(modelId: string): string {
+  const modelMap: Record<string, string> = {
+    'stable-horde-flux-schnell': 'FLUX.1 [schnell]',
+    'stable-horde-sdxl': 'SDXL 1.0',
+    'stable-horde-deliberate': 'Deliberate',
+    'stable-horde-dreamshaper': 'Dreamshaper',
+    'stable-horde-realistic-vision': 'Realistic Vision',
+    'stable-horde-absolute-reality': 'AbsoluteReality',
+    'stable-horde-juggernaut-xl': 'Juggernaut XL',
+    'stable-horde-pony-diffusion': 'Pony Diffusion XL',
+    'stable-horde-stable-diffusion': 'stable_diffusion',
+    'stable-horde-anything-v5': 'Anything v5',
+    'stable-horde-flux-dev': 'FLUX.1 [dev]',
+    'stable-horde-icbinp': "I Can't Believe It's Not Photo",
+    'stable-horde-dreamlike-photoreal': 'Dreamlike Photoreal',
+  };
+  return modelMap[modelId] || 'stable_diffusion';
+}
+
+export async function POST(request: NextRequest) {
+  try {
+    let sessionUserId = null;
+    try {
+      const clerkUser = await currentUser();
+    const isAuthenticated = !!clerkUser;
+    const claims = clerkUser ? { sub: clerkUser.id, email: clerkUser.emailAddresses?.[0]?.emailAddress, username: clerkUser.username, name: [clerkUser.firstName, clerkUser.lastName].filter(Boolean).join(' '), picture: clerkUser.imageUrl } : null;
+      if (isAuthenticated && claims) {
+        sessionUserId = claims.sub;
+      }
+    } catch (authError) {
+      // Ignore auth error for API keys
+    }
+    const rawApiKey = extractApiKey(request.headers);
+    const clientIp = (request as any).ip || 
+                     request.headers.get('x-forwarded-for')?.split(',')[0] || 
+                     request.headers.get('x-real-ip') || 
+                     'anonymous';
+    const effectiveKey = rawApiKey || clientIp;
+    
+    let apiKeyInfo: ApiKey | null = null;
+    let userPlan = 'free';
+
+    if (rawApiKey) {
+      apiKeyInfo = await validateApiKey(rawApiKey);
+      if (apiKeyInfo?.plan) {
+        userPlan = apiKeyInfo.plan;
+      }
+    } else if (sessionUserId) {
+      // Fetch plan for session users if no API key is provided
+      const { data: profile } = await supabaseAdmin
+        .from('elholk_profiles')
+        .select('plan, email')
+        .eq('id', sessionUserId)
+        .maybeSingle();
+      
+      if (profile) {
+        userPlan = profile.plan || 'free';
+        // Manual override for specific users requested by admin
+        userPlan = await applyPlanOverride(profile.email, userPlan, sessionUserId, 'id');
+      }
+    }
+
+    // Ensure plan is lowercase for consistency
+    userPlan = userPlan?.toLowerCase() || 'free';
+
+    // Determine limit based on plan
+    let limit = 5; // Default anonymous/free limit (5 RPM for images)
+    let dailyLimit = 1000; // Default 1000 RPD
+    
+    if (userPlan === 'admin' || userPlan === 'enterprise') {
+      limit = 100;
+      dailyLimit = 100000;
+    } else if (userPlan === 'pro') {
+      limit = 5; // 5 RPM for images as requested
+      dailyLimit = 2000; // 2000 RPD for pro
+    } else if (userPlan === 'developer') {
+      limit = 20;
+      dailyLimit = 5000;
+    } else if (userPlan === 'free') {
+      limit = 5; // 5 RPM for images
+      dailyLimit = 1000; // 1000 RPD for free
+    }
+
+    // If API key has a specific custom limit that's higher, use that
+    if (apiKeyInfo && apiKeyInfo.rateLimit > limit) {
+      limit = apiKeyInfo.rateLimit;
+    }
+    
+    // Apply peak hours reduction (5 PM - 5 AM UTC): 50% reduction for all users
+    limit = applyPeakHoursLimit(limit);
+    dailyLimit = applyPeakHoursLimit(dailyLimit);
+    
+    // VPS Bypass: Don't count requests from our own VPS against RPD
+    const isSystemRequest = clientIp === '157.151.169.121';
+    
+    // Check Daily Limit First
+    if (!isSystemRequest && !await checkDailyLimit(effectiveKey, dailyLimit, apiKeyInfo?.id)) {
+      const dailyInfo = await getDailyLimitInfo(effectiveKey, dailyLimit, apiKeyInfo?.id);
+      return NextResponse.json(
+        { 
+          error: {
+            message: `Daily request limit exceeded (${dailyLimit} RPD). Your limit resets at ${new Date(dailyInfo.resetAt).toUTCString()}. Upgrade for higher limits.`,
+            type: 'requests',
+            param: null,
+            code: 'daily_limit_exceeded'
+          }
+        },
+        { 
+          status: 429,
+          headers: {
+            ...getCorsHeaders(),
+            'X-DailyLimit-Remaining': String(dailyInfo.remaining),
+            'X-DailyLimit-Reset': String(dailyInfo.resetAt),
+          },
+        }
+      );
+    }
+    
+    if (!isSystemRequest && !await checkRateLimit(effectiveKey, limit, 'image')) {
+      const rateLimitInfo = await getRateLimitInfo(effectiveKey, limit, 'image');
+      return NextResponse.json(
+        { 
+          error: {
+            message: 'Rate limit exceeded',
+            type: 'requests',
+            param: null,
+            code: 'rate_limit_exceeded'
+          }
+        },
+        { 
+          status: 429,
+          headers: {
+            ...getCorsHeaders(),
+            'X-RateLimit-Remaining': '0',
+            'X-RateLimit-Reset': String(rateLimitInfo.resetAt),
+          },
+        }
+      );
+    }
+
+    const body = await request.json();
+    
+    // Validate required fields
+    if (!body.prompt) {
+      return NextResponse.json(
+        { 
+          error: {
+            message: 'prompt is required',
+            type: 'invalid_request_error',
+            param: 'prompt',
+            code: null
+          }
+        },
+        { 
+          status: 400,
+          headers: getCorsHeaders()
+        }
+      );
+    }
+
+    // Get model or use default
+    const modelId = body.model || 'flux';
+    const model = IMAGE_MODELS.find(m => m.id === modelId);
+    
+    if (!model) {
+      const popularModels = IMAGE_MODELS.slice(0, 10).map(m => m.id).join(', ');
+      return NextResponse.json(
+        { 
+          error: {
+            message: `Unknown model: ${modelId}. Popular models: ${popularModels}, and more. Use /v1/models to see all ${IMAGE_MODELS.length} models.`,
+            type: 'invalid_request_error',
+            param: 'model',
+            code: 'model_not_found'
+          }
+        },
+        { 
+          status: 400,
+          headers: getCorsHeaders()
+        }
+      );
+    }
+
+    // Check if model is premium and if user has access
+    const isPremium = PREMIUM_MODELS.has(modelId);
+    // Pro access if they have a pro/enterprise/developer/admin plan
+    const hasPro = hasProAccess(userPlan);
+
+    if (isPremium && !hasPro) {
+      return NextResponse.json(
+        {
+          error: {
+            message: `The model '${modelId}' is only available on Pro and Enterprise plans. Please upgrade at ${process.env.NEXT_PUBLIC_APP_URL}/pricing`,
+            type: 'access_denied',
+            param: 'model',
+            code: 'premium_model_required'
+          }
+        },
+        {
+          status: 403,
+          headers: getCorsHeaders()
+        }
+      );
+    }
+
+    const userId = request.headers.get('x-user-id') || apiKeyInfo?.userId || sessionUserId || `anonymous-${clientIp}`;
+    let imageUrl = '';
+
+    if (model.provider === 'appypie') {
+      const apiKey = process.env.APPYPIE_API_KEY;
+      if (!apiKey) {
+        return NextResponse.json(
+          { 
+            error: {
+              message: 'APPYPIE_API_KEY not configured',
+              type: 'server_error',
+              param: null,
+              code: 'configuration_error'
+            }
+          },
+          { status: 500, headers: getCorsHeaders() }
+        );
+      }
+
+      let url: string;
+      let appyPieBody: any;
+
+      if (model.id === 'appypie-sdxl') {
+        url = PROVIDER_URLS.appypie.sdxl;
+        appyPieBody = {
+          prompt: body.prompt,
+          negative_prompt: body.negative_prompt || 'Low-quality, blurry image',
+          height: body.size?.split('x')[1] || body.height || 1024,
+          width: body.size?.split('x')[0] || body.width || 1024,
+        };
+      } else if (model.id === 'appypie-sd-inpainting') {
+        url = PROVIDER_URLS.appypie.inpainting;
+        appyPieBody = {
+          prompt: body.prompt,
+          imageUrl: body.image_url,
+          maskUrl: body.mask_url,
+        };
+      } else {
+        url = PROVIDER_URLS.appypie.fluxSchnell;
+        appyPieBody = {
+          prompt: body.prompt,
+          height: body.size?.split('x')[1] || body.height || 512,
+          width: body.size?.split('x')[0] || body.width || 512,
+        };
+      }
+
+      let response;
+      try {
+        response = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Ocp-Apim-Subscription-Key': apiKey,
+            'x-user-id': userId,
+          },
+          body: JSON.stringify(appyPieBody),
+        });
+      } catch (e) {
+        return NextResponse.json(
+          { error: { message: 'Failed to connect to AppyPie API', type: 'api_error' } },
+          { status: 500, headers: getCorsHeaders() }
+        );
+      }
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        return NextResponse.json(
+          { 
+            error: { 
+              message: `AppyPie API error: ${response.status}`, 
+              type: 'api_error',
+              details: errorText.substring(0, 500)
+            } 
+          },
+          { status: response.status, headers: getCorsHeaders() }
+        );
+      }
+
+      // AppyPie can return the image directly or a JSON with a URL
+      const contentType = response.headers.get('content-type');
+      let base64: string;
+      let mimeType: string;
+
+      if (contentType && contentType.includes('application/json')) {
+        const data = await safeResponseJson(response, null as any);
+        const imageUrlFromData = data?.image_url || data?.url || (data?.data && data.data[0] && data.data[0].url);
+        
+        if (!imageUrlFromData) {
+          return NextResponse.json(
+            { error: { message: 'AppyPie returned JSON but no image URL was found', type: 'api_error', data } },
+            { status: 500, headers: getCorsHeaders() }
+          );
+        }
+
+        const imageResponse = await fetch(imageUrlFromData);
+        if (!imageResponse.ok) {
+          return NextResponse.json(
+            { error: { message: 'Failed to fetch image from AppyPie JSON URL', type: 'api_error' } },
+            { status: 500, headers: getCorsHeaders() }
+          );
+        }
+        
+        const blob = await imageResponse.blob();
+        const buffer = Buffer.from(await blob.arrayBuffer());
+        base64 = buffer.toString('base64');
+        mimeType = imageResponse.headers.get('content-type') || 'image/png';
+        
+        if (body.response_format !== 'b64_json') {
+          imageUrl = imageUrlFromData;
+        }
+      } else {
+        const blob = await response.blob();
+        const buffer = Buffer.from(await blob.arrayBuffer());
+        base64 = buffer.toString('base64');
+        mimeType = response.headers.get('content-type') || 'image/png';
+      }
+      
+      if (body.response_format === 'b64_json') {
+        return NextResponse.json({
+          created: Math.floor(Date.now() / 1000),
+          data: [{ b64_json: base64 }]
+        }, { headers: getCorsHeaders() });
+      }
+      
+      if (!imageUrl) {
+        imageUrl = `data:${mimeType};base64,${base64}`;
+      }
+
+    } else if (model.provider === 'stablehorde') {
+      const hordeApiKey = process.env.AI_HORDE_API_KEY || process.env.STABLEHORDE_API_KEY || process.env.STABLE_HORDE_API_KEY || '0000000000';
+      const hordeUrl = PROVIDER_URLS.stablehorde;
+      const modelName = getStableHordeModelName(model.id);
+      
+      const generateResponse = await fetch(`${hordeUrl}/generate/async`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'apikey': hordeApiKey,
+          'Client-Agent': 'Elholk:1.0:cloudgptapi@github.com',
+        },
+        body: JSON.stringify({
+          prompt: body.prompt,
+          params: {
+            height: body.size?.split('x')[1] || body.height || 512,
+            width: body.size?.split('x')[0] || body.width || 512,
+            steps: 30,
+            n: 1,
+          },
+          models: [modelName],
+          r2: true,
+        }),
+      });
+
+      if (!generateResponse.ok) {
+        return NextResponse.json(
+          { 
+            error: {
+              message: 'Stable Horde API error',
+              type: 'api_error',
+              param: null,
+              code: 'upstream_error'
+            }
+          },
+          { status: generateResponse.status, headers: getCorsHeaders() }
+        );
+      }
+
+      const { id: requestId } = await generateResponse.json();
+      
+      // Poll for completion (increased to 5 minutes to match image API)
+      let attempts = 0;
+      const maxAttempts = 150; // 150 * 2s = 300s (5 minutes)
+      while (attempts < maxAttempts) {
+        await new Promise(r => setTimeout(r, 2000));
+        const check = await fetch(`${hordeUrl}/generate/check/${requestId}`, {
+          headers: { 'Client-Agent': 'Elholk:1.0:cloudgptapi@github.com' }
+        });
+        
+        if (!check.ok) {
+          attempts++;
+          continue;
+        }
+
+        const checkData = await check.json();
+        
+        if (checkData.done) {
+          const status = await fetch(`${hordeUrl}/generate/status/${requestId}`, {
+            headers: { 'Client-Agent': 'Elholk:1.0:cloudgptapi@github.com' }
+          });
+          const statusData = await status.json();
+          if (statusData.generations?.[0]?.img) {
+            imageUrl = statusData.generations[0].img;
+            break;
+          }
+        }
+
+        if (checkData.faulted) {
+          return NextResponse.json(
+            { 
+              error: {
+                message: 'Generation failed on Stable Horde',
+                type: 'api_error',
+                param: null,
+                code: 'horde_faulted'
+              }
+            },
+            { status: 500, headers: getCorsHeaders() }
+          );
+        }
+
+        attempts++;
+      }
+
+      if (!imageUrl) {
+        return NextResponse.json(
+          { 
+            error: {
+              message: 'Generation timed out after 5 minutes. Stable Horde is currently busy or has a long queue. Try a different model or provider like Flux or AppyPie for faster results.',
+              type: 'api_error',
+              param: null,
+              code: 'horde_timeout'
+            }
+          },
+          { status: 504, headers: getCorsHeaders() }
+        );
+      }
+
+    } else if (model.provider === 'github') {
+      const providerApiKey = process.env.GITHUB_TOKEN;
+      
+      if (!providerApiKey) {
+        return NextResponse.json(
+          {
+            error: {
+              message: 'GitHub Models token is not configured. Please add GITHUB_TOKEN to your .env.local file.',
+              type: 'config_error',
+              param: null,
+              code: 'missing_api_key'
+            }
+          },
+          { status: 500, headers: getCorsHeaders() }
+        );
+      }
+
+      try {
+        const response = await fetch(`${PROVIDER_URLS.github}/images/generations`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${providerApiKey}`,
+            'x-user-id': userId,
+          },
+          body: JSON.stringify({
+            model: model.id,
+            prompt: body.prompt,
+            n: 1,
+            size: body.size || '1024x1024',
+            response_format: body.response_format || 'url',
+          }),
+        });
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          console.error(`[V1-Images] GitHub Models error (${response.status}):`, errorText.substring(0, 1000));
+          
+          try {
+            const errorJson = JSON.parse(errorText);
+            if (errorJson.error) {
+              return NextResponse.json(errorJson, { 
+                status: response.status, 
+                headers: getCorsHeaders() 
+              });
+            }
+            
+            return NextResponse.json(
+              { 
+                error: { 
+                  message: errorJson.message || `GitHub Models API error: ${response.status}`, 
+                  type: 'api_error',
+                  code: errorJson.code || 'upstream_error',
+                  details: errorJson
+                } 
+              },
+              { status: response.status, headers: getCorsHeaders() }
+            );
+          } catch (e) {
+            return NextResponse.json(
+              { 
+                error: { 
+                  message: `GitHub Models API error: ${response.status}`, 
+                  type: 'api_error',
+                  code: 'upstream_error',
+                  details: errorText.substring(0, 500)
+                } 
+              },
+              { status: response.status, headers: getCorsHeaders() }
+            );
+          }
+        }
+
+        const data = await response.json();
+        
+        if (body.response_format === 'b64_json') {
+          return NextResponse.json(data, { headers: getCorsHeaders() });
+        }
+        
+        imageUrl = data.data?.[0]?.url;
+        if (!imageUrl) {
+          return NextResponse.json(
+            { error: { message: 'GitHub Models returned no image URL', type: 'api_error' } },
+            { status: 500, headers: getCorsHeaders() }
+          );
+        }
+      } catch (e) {
+        return NextResponse.json(
+          { error: { message: 'Failed to connect to GitHub Models API', type: 'api_error' } },
+          { status: 500, headers: getCorsHeaders() }
+        );
+      }
+    } else {
+      // Pollinations
+      const params = new URLSearchParams();
+      params.set('model', modelId);
+      if (body.size) {
+        const [width, height] = body.size.split('x');
+        params.set('width', width);
+        params.set('height', height);
+      }
+      if (body.seed) params.set('seed', String(body.seed));
+      params.set('nologo', 'true');
+      
+      const pollinationsUrl = `https://gen.pollinations.ai/image/${encodeURIComponent(body.prompt)}?${params.toString()}`;
+      
+      // We'll verify the image exists and proxy it to handle errors better
+      // and provide a direct link to our own API if needed.
+      const pollinationsApiKey = getPollinationsApiKey();
+      const headers: Record<string, string> = {
+        'x-user-id': userId,
+      };
+      if (pollinationsApiKey) {
+        headers['Authorization'] = `Bearer ${pollinationsApiKey}`;
+      }
+
+      // Use a more robust retry mechanism for Pollinations
+      let retryCount = 0;
+      const maxRetries = 3; // 3 retries for v1 to be extra safe
+      let pollinationsResponse;
+      let currentApiKey = pollinationsApiKey;
+
+      while (retryCount <= maxRetries) {
+        try {
+          const currentHeaders: Record<string, string> = { ...headers };
+          if (currentApiKey) {
+            currentHeaders['Authorization'] = `Bearer ${currentApiKey}`;
+          }
+
+          pollinationsResponse = await fetch(pollinationsUrl, { headers: currentHeaders });
+          
+          if (pollinationsResponse.ok) break;
+          
+          // Handle 401 Unauthorized by trying a different key
+          if (pollinationsResponse.status === 401) {
+            console.warn(`[V1-Images] Pollinations unauthorized (401). Attempting key rotation...`);
+            const allKeys = getPollinationsApiKeys();
+            if (allKeys.length > 1) {
+              // Pick a different key that isn't the current one
+              const otherKeys = allKeys.filter((k: string) => k !== currentApiKey);
+              currentApiKey = otherKeys[Math.floor(Math.random() * otherKeys.length)];
+              retryCount++;
+              continue;
+            }
+          }
+          
+          if (pollinationsResponse.status === 500 || pollinationsResponse.status === 504 || pollinationsResponse.status === 429) {
+            console.warn(`[V1-Images] Pollinations returned ${pollinationsResponse.status}, retrying (${retryCount + 1}/${maxRetries})...`);
+            retryCount++;
+            await new Promise(r => setTimeout(r, 2000 * retryCount)); // Exponential backoff
+            continue;
+          }
+          break;
+        } catch (e) {
+          console.error(`[V1-Images] Pollinations fetch error:`, e);
+          retryCount++;
+          await new Promise(r => setTimeout(r, 2000 * retryCount));
+        }
+      }
+
+      if (pollinationsResponse && pollinationsResponse.ok) {
+        // If we want to return a URL, we can return the direct one, 
+        // but now we know it's valid (or at least was a moment ago).
+        imageUrl = pollinationsUrl;
+      } else {
+        return NextResponse.json(
+          { 
+            error: {
+              message: 'Pollinations generation failed or timed out',
+              type: 'api_error',
+              status: pollinationsResponse?.status || 500
+            }
+          },
+          { status: pollinationsResponse?.status || 500, headers: getCorsHeaders() }
+        );
+      }
+    }
+
+    if (apiKeyInfo && !isSystemRequest) {
+      const usageWeight = model.usageWeight || 5;
+      await trackUsage(apiKeyInfo.id, apiKeyInfo.userId, modelId, 'image', undefined, usageWeight);
+    }
+
+    const rateLimitInfo = await getRateLimitInfo(effectiveKey, limit, 'image');
+    const dailyLimitInfo = await getDailyLimitInfo(effectiveKey, dailyLimit, apiKeyInfo?.id);
+
+    return NextResponse.json({
+      created: Math.floor(Date.now() / 1000),
+      data: [{ url: imageUrl }]
+    }, { 
+      headers: {
+        ...getCorsHeaders(),
+        'X-RateLimit-Remaining': String(rateLimitInfo.remaining),
+        'X-RateLimit-Reset': String(rateLimitInfo.resetAt),
+        'X-RateLimit-Limit': String(rateLimitInfo.limit),
+        'X-DailyLimit-Remaining': String(dailyLimitInfo.remaining),
+        'X-DailyLimit-Reset': String(dailyLimitInfo.resetAt),
+        'X-DailyLimit-Limit': String(dailyLimitInfo.limit),
+      }
+    });
+
+  } catch (error) {
+      console.error('Images API error:', error);
+      return NextResponse.json(
+        { 
+          error: {
+            message: 'Internal server error',
+            type: 'server_error',
+            param: null,
+            code: 'internal_error'
+          }
+        },
+        { status: 500, headers: getCorsHeaders() }
+      );
+    }
+  }

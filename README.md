@@ -1,0 +1,298 @@
+# ☁️ Elholk - Unified AI API Gateway
+
+A unified API gateway for AI chat, image, and video generation. Access multiple AI providers through a single, consistent API interface.
+
+## ✨ Features
+
+- **🔗 Unified API** - Single API for chat, image, and video generation
+- **⚡ Edge Runtime** - Fast responses with Vercel Edge Functions
+- **🔐 Authentication** - Secure user accounts with Clerk
+- **🔑 API Keys** - Generate and manage API keys from the dashboard
+- **🌐 Multi-Provider** - Access Pollinations AI and more
+- **📱 Responsive** - Works on desktop and mobile devices
+- **🎨 Dark Mode** - Automatic dark mode support
+
+## 🚀 Quick Start
+
+### Local Development
+
+```bash
+# Clone the repository
+git clone https://github.com/CloudCompile/cloudgpt.git
+cd cloudgpt
+
+# Install dependencies
+npm install
+
+# Set up environment variables
+cp .env.example .env.local
+# Edit .env.local with your API keys
+
+# Run the development server
+npm run dev
+```
+
+Open [http://localhost:3000](http://localhost:3000) to see the application.
+
+## 📡 API Endpoints
+
+For complete API documentation, see [API_DOCUMENTATION.md](./API_DOCUMENTATION.md).
+
+### Quick Reference
+
+### Chat Completions
+
+Generate chat completions using various LLMs.
+
+```bash
+POST /v1/chat/completions
+```
+
+**Headers:**
+```http
+Authorization: Bearer YOUR_API_KEY
+Content-Type: application/json
+x-user-id: unique-user-123 (optional)
+```
+
+**Request:**
+```json
+{
+  "model": "openai",
+  "messages": [
+    {"role": "user", "content": "Hello, how are you?"}
+  ],
+  "temperature": 0.7,
+  "max_tokens": 1000
+}
+```
+
+**Response:**
+```json
+{
+  "id": "chatcmpl-xxx",
+  "object": "chat.completion",
+  "created": 1234567890,
+  "model": "openai",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "Hello! I'm doing well, thank you for asking."
+      },
+      "finish_reason": "stop"
+    }
+  ]
+}
+```
+
+### Image Generation
+
+Generate images from text prompts.
+
+```bash
+POST /v1/images/generations
+```
+
+**Request:**
+```json
+{
+  "prompt": "A beautiful sunset over mountains",
+  "model": "flux"
+}
+```
+
+**Response:** Returns JSON with image URL. Use `POST /api/image` for raw binary.
+
+### Video Generation
+
+Generate videos from text prompts.
+
+```bash
+POST /v1/video/generations
+```
+
+**Request:**
+```json
+{
+  "prompt": "A cat playing with a ball",
+  "model": "veo",
+  "duration": 4
+}
+```
+
+**Response:** Returns JSON with video URL. Use `POST /api/video` for raw binary.
+
+### Model Listings
+
+Get available models for all modalities:
+
+```bash
+GET /v1/models
+```
+
+## 🔑 Authentication
+
+### User Authentication
+
+The dashboard and API key management require user authentication via Clerk. Sign in to access:
+- API key creation and management
+- Usage statistics (coming soon)
+- Account settings
+
+### API Authentication
+
+Use your API key in the Authorization header:
+
+```bash
+curl -X POST https://your-app.vercel.app/v1/chat/completions \
+  -H "Authorization: Bearer cgpt_xxxxxxxxxxxxxxxxxxxx" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "openai", "messages": [{"role": "user", "content": "Hello!"}]}'
+```
+
+## 📋 Available Models
+
+### Chat Models
+
+| Model ID | Name | Description |
+|----------|------|-------------|
+| `openai` | OpenAI GPT-5 Mini | OpenAI's flagship fast model |
+| `openai-fast` | OpenAI GPT-5 Nano | Faster, more economical |
+| `openai-large` | OpenAI GPT-5.2 | Latest OpenAI flagship |
+| `claude` | Anthropic Claude Sonnet 4.5 | Anthropic's balanced model |
+| `claude-fast` | Anthropic Claude Haiku 4.5 | Fast Claude responses |
+| `gemini` | Google Gemini 3 Flash | Google's fast model |
+| `gemini-large` | Google Gemini 3 Pro | Google's advanced model |
+| `deepseek` | DeepSeek V3.2 | DeepSeek's latest |
+| `grok` | Grok 4 Fast | xAI's model |
+| `mistral` | Mistral Small 3.2 24B | Mistral AI's fast model |
+| `qwen-coder` | Qwen3 Coder 30B | Coding-focused model |
+| `chickytutor` | ChickyTutor | Educational AI tutor |
+| `midijourney` | Midijourney | Creative AI assistant |
+
+### Liz Proxy Models (Premium)
+
+| Model ID | Name | Description |
+|----------|------|-------------|
+| `liz-claude-3-7-sonnet` | Claude 3.7 Sonnet (Liz) | Latest Anthropic flagship (v3.7) |
+| `liz-claude-3-5-sonnet` | Claude 3.5 Sonnet (Liz) | Optimized Anthropic flagship (v3.5) |
+| `liz-claude-3-opus` | Claude 3 Opus (Liz) | NSFW/Smut Optimized roleplay model |
+| `liz-claude-sonnet-4` | Claude Sonnet 4 (Liz) | Next-gen Anthropic model (v4) |
+| `liz-claude-opus-4` | Claude Opus 4 (Liz) | Creative/NSFW Optimized roleplay (v4) |
+| `liz-claude-opus-4.5` | Claude Opus 4.5 (Liz) | Ultimate reasoning & narrative (v4.5) |
+| `liz-gpt-4o` | GPT-4o (Liz) | Reliable OpenAI flagship |
+| `liz-gemini-3-pro` | Gemini 3 Pro (Liz) | Next-gen Google flagship (Preview) |
+| `liz-gemini-3-flash` | Gemini 3 Flash (Liz) | Next-gen Google fast model (Preview) |
+| `liz-gemini-2.5-pro` | Gemini 2.5 Pro (Liz) | Advanced Google flagship |
+| `liz-gemini-2.5-flash` | Gemini 2.5 Flash (Liz) | Latest Google fast model |
+| `liz-gemini-2.0-flash` | Gemini 2.0 Flash (Liz) | Reliable Google fast model |
+| `liz-gemini-1.5-pro` | Gemini 1.5 Pro (Liz) | Massive context analysis |
+| `liz-o1` | OpenAI o1 (Liz) | Deep reasoning & strategy |
+| `liz-o3-mini` | OpenAI o3-mini (Liz) | Fast reasoning & coding |
+| `liz-deepseek-v3` | DeepSeek V3 (Liz) | Top-tier open source model |
+| `liz-deepseek-r1` | DeepSeek R1 (Liz) | Reasoning-focused open source |
+| `liz-qwen3-235b` | Qwen3 235B (Liz) | Large-scale multilingual model |
+| `liz-llama-3.3-70b` | Llama 3.3 70B (Liz) | Efficient flagship-class model |
+
+### Image Models
+
+| Model ID | Name | Description |
+|----------|------|-------------|
+| `flux` | Flux | High-quality generation |
+| `turbo` | Turbo | Fast generation |
+| `gptimage` | GPT Image | OpenAI DALL-E |
+| `kontext` | Kontext | Context-aware |
+| `seedream` | Seedream | Creative styles |
+
+### Video Models
+
+| Model ID | Name | Max Duration |
+|----------|------|--------------|
+| `veo` | Google Veo | 8 seconds |
+| `seedance` | Seedance | 10 seconds |
+| `seedance-pro` | Seedance Pro | 10 seconds |
+
+## 🛠️ Configuration
+
+See [KEYS_SETUP.md](./KEYS_SETUP.md) for detailed instructions on setting up:
+- Logto authentication
+- Pollinations API key
+- Other environment variables
+
+## 📁 Project Structure
+
+```
+cloudgpt/
+├── app/
+│   ├── api/
+│   │   ├── image/route.ts     # Image generation endpoint
+│   │   ├── video/route.ts     # Video generation endpoint
+│   │   ├── keys/route.ts      # API key management
+│   │   ├── mem/route.ts       # Memory API endpoint
+│   │   └── models/
+│   │       ├── image/route.ts # List image models
+│   │       └── video/route.ts # List video models
+│   ├── v1/
+│   │   ├── chat/
+│   │   │   └── completions/route.ts # Chat completions endpoint
+│   │   └── models/route.ts    # List chat models
+│   ├── dashboard/
+│   │   └── page.tsx           # Dashboard page
+│   ├── layout.tsx             # Root layout with Logto
+│   ├── page.tsx               # Home page
+│   └── globals.css            # Global styles
+├── lib/
+│   ├── api-keys.ts            # API key utilities
+│   └── providers.ts           # AI provider configs
+├── docs/                      # Frontend for GitHub Pages
+├── middleware.ts              # Logto middleware
+├── KEYS_SETUP.md              # Keys setup guide
+└── README.md                  # This file
+```
+
+## 🌐 GitHub Pages Frontend
+
+The `/docs` folder contains a static frontend that can be deployed to GitHub Pages. It provides:
+- API documentation
+- Interactive examples
+- Getting started guide
+
+To enable GitHub Pages:
+1. Go to your repository Settings
+2. Navigate to Pages
+3. Set Source to "Deploy from a branch"
+4. Select the `main` branch and `/docs` folder
+
+## 🔒 Rate Limits
+
+| User Type | Chat | Image | Video |
+|-----------|------|-------|-------|
+| Anonymous | 10/min | 5/min | 2/min |
+| Authenticated | 60/min | 30/min | 10/min |
+
+Rate limit headers are included in responses:
+- `X-RateLimit-Remaining`: Requests remaining
+- `X-RateLimit-Reset`: Reset timestamp
+
+## 🤝 Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## 🙏 Acknowledgments
+
+- [Pollinations AI](https://pollinations.ai) - AI generation API
+- [Logto](https://logto.io) - Authentication
+- [Vercel](https://vercel.com) - Hosting platform
+- [Next.js](https://nextjs.org) - React framework
